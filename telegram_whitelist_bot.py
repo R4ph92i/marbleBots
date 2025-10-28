@@ -151,7 +151,8 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Bot + Web ---
 def start_bot():
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
+
 
     conv = ConversationHandler(
         entry_points=[
