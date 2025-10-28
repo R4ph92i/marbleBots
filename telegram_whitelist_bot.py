@@ -1,8 +1,9 @@
 """
-Telegram Whitelist Bot — Solana only, English compact version
+Telegram Whitelist Bot — Solana only + Render KeepAlive
 - Accepts only Solana addresses (base58, 32–44 chars)
 - One wallet per user, editable
 - Commands: !whitelist /whitelist /mywallet /editwallet /export
+- Includes FastAPI keep-alive endpoint for Render free hosting
 """
 
 import os
@@ -10,8 +11,12 @@ import re
 import csv
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from typing import Tuple
+
+from fastapi import FastAPI
+import uvicorn
 
 from telegram import Update
 from telegram.ext import (
@@ -22,20 +27,8 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from threading import Thread
-from fastapi import FastAPI
-import uvicorn
 
-app = FastAPI()
-
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "bot alive"}
-
-def run_webserver():
-    uvicorn.run(app, host="0.0.0.0", port=8080)
-
-
+# --- Config ---
 DB_PATH = "whitelist.db"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_IDS = set()
@@ -46,6 +39,23 @@ ASKING_ADDRESS = 1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- FastAPI keepalive ---
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Whitelist bot running"}
+
+@app.get("/ping")
+def ping():
+    return {"pong": True}
+
+
+def run_web():
+    """Runs FastAPI keep-alive server in a background thread"""
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 # --- Database ---
 def init_db():
@@ -101,14 +111,14 @@ def export_csv(path: str):
         writer.writerow(["tg_id", "username", "display_name", "wallet", "updated_at"])
         writer.writerows(rows)
 
-# --- Solana wallet validation ---
+# --- Solana validation ---
 SOLANA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 def is_valid_wallet(addr: str) -> bool:
     addr = addr.strip()
     return bool(SOLANA_RE.fullmatch(addr))
 
-# --- Bot handlers ---
+# --- Telegram Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hey! Type !whitelist or /whitelist to add your Solana wallet (1 per user, editable).\nUse /mywallet to check or /editwallet to update."
@@ -174,12 +184,16 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if txt.lower() == "!whitelist":
         return await whitelist_entry(update, context)
 
-
+# --- Main ---
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Set TELEGRAM_TOKEN environment variable.")
 
     init_db()
+
+    # Start FastAPI web server in background
+    threading.Thread(target=run_web, daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -201,9 +215,7 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
 
-    logger.info("Solana whitelist bot running...")
-    Thread(target=run_webserver, daemon=True).start()
-
+    logger.info("Solana whitelist bot + keep-alive server running...")
     app.run_polling()
 
 
