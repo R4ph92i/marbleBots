@@ -158,7 +158,8 @@ def start_bot():
     # Fix for Python 3.13: create an event loop explicitly
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(app.run_polling())
+    loop.run_until_complete(app.run_polling(close_loop=False, stop_signals=None))
+
 
 # --- FastAPI keep-alive ---
 fastapi_app = FastAPI()
