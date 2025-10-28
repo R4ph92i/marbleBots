@@ -1,6 +1,6 @@
 """
 Telegram Whitelist Bot — Solana only + Render keep-alive (web main)
-Runs FastAPI web server as main thread and Telegram bot as background thread.
+Fixed for Python 3.13 asyncio event loop
 """
 
 import os
@@ -9,6 +9,7 @@ import csv
 import sqlite3
 import logging
 import threading
+import asyncio
 from datetime import datetime
 from typing import Tuple
 
@@ -25,25 +26,20 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-# --- Config ---
 DB_PATH = "whitelist.db"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_IDS = set()
-if os.environ.get("ADMIN_IDS"):
-    ADMIN_IDS = set(int(x.strip()) for x in os.environ.get("ADMIN_IDS").split(",") if x.strip())
-
+ADMIN_IDS = set(int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip())
 ASKING_ADDRESS = 1
 PORT = int(os.environ.get("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Database ---
+# --- Database helpers ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """
+    c.execute("""
         CREATE TABLE IF NOT EXISTS whitelist (
             tg_id INTEGER PRIMARY KEY,
             username TEXT,
@@ -51,34 +47,30 @@ def init_db():
             wallet TEXT,
             updated_at TEXT
         )
-        """
-    )
+    """)
     conn.commit()
     conn.close()
 
-def set_wallet(tg_id: int, username: str | None, display_name: str | None, wallet: str):
+def set_wallet(tg_id, username, display_name, wallet):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    now = datetime.utcnow().isoformat()
     c.execute(
-        "INSERT INTO whitelist (tg_id, username, display_name, wallet, updated_at) VALUES (?, ?, ?, ?, ?)"
-        " ON CONFLICT(tg_id) DO UPDATE SET wallet=excluded.wallet, username=excluded.username, display_name=excluded.display_name, updated_at=excluded.updated_at",
-        (tg_id, username, display_name, wallet, now),
+        "INSERT INTO whitelist VALUES (?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(tg_id) DO UPDATE SET wallet=excluded.wallet, updated_at=datetime('now')",
+        (tg_id, username, display_name, wallet),
     )
     conn.commit()
     conn.close()
 
-def get_wallet(tg_id: int) -> Tuple[str | None, str | None]:
+def get_wallet(tg_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT wallet, updated_at FROM whitelist WHERE tg_id = ?", (tg_id,))
+    c.execute("SELECT wallet, updated_at FROM whitelist WHERE tg_id=?", (tg_id,))
     row = c.fetchone()
     conn.close()
-    if row:
-        return row[0], row[1]
-    return None, None
+    return row if row else (None, None)
 
-def export_csv(path: str):
+def export_csv(path):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT tg_id, username, display_name, wallet, updated_at FROM whitelist ORDER BY updated_at DESC")
@@ -91,12 +83,11 @@ def export_csv(path: str):
 
 # --- Solana validation ---
 SOLANA_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-def is_valid_wallet(addr: str) -> bool:
-    return bool(SOLANA_RE.fullmatch(addr.strip()))
+def is_valid_wallet(addr): return bool(SOLANA_RE.fullmatch(addr.strip()))
 
-# --- Telegram Handlers ---
+# --- Telegram bot logic ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hey! Type !whitelist or /whitelist to add your Solana wallet.\nUse /mywallet or /editwallet.")
+    await update.message.reply_text("Hey! Type !whitelist or /whitelist to add your Solana wallet.")
 
 async def whitelist_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -104,32 +95,27 @@ async def whitelist_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current:
         await update.message.reply_text(f"You already have `{current}`. Use /editwallet to change it.")
         return ConversationHandler.END
-    await update.message.reply_text("Send your Solana wallet address (base58, 32–44 chars):")
+    await update.message.reply_text("Send your Solana wallet address:")
     return ASKING_ADDRESS
 
 async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
     if not is_valid_wallet(text):
-        await update.message.reply_text("❌ Invalid Solana address. Try again or /cancel.")
+        await update.message.reply_text("❌ Invalid address. Try again or /cancel.")
         return ASKING_ADDRESS
     set_wallet(user.id, user.username, user.full_name, text)
     await update.message.reply_text("✅ Added to whitelist!")
     return ConversationHandler.END
 
 async def editwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    current, _ = get_wallet(user.id)
-    await update.message.reply_text(f"Current: `{current}`\nSend new Solana address or /cancel.")
+    current, _ = get_wallet(update.effective_user.id)
+    await update.message.reply_text(f"Current: `{current}`\nSend new address or /cancel.")
     return ASKING_ADDRESS
 
 async def mywallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    current, _ = get_wallet(user.id)
-    if current:
-        await update.message.reply_text(f"Your wallet: `{current}`")
-    else:
-        await update.message.reply_text("No wallet saved. Type !whitelist to add one.")
+    current, _ = get_wallet(update.effective_user.id)
+    await update.message.reply_text(f"Your wallet: `{current}`" if current else "No wallet yet. Type !whitelist.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.")
@@ -144,21 +130,17 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(open(path, "rb"))
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip().lower()
-    if txt == "!whitelist":
+    if update.message.text.strip().lower() == "!whitelist":
         return await whitelist_entry(update, context)
 
-# --- Bot + Web ---
+# --- Bot runner ---
 def start_bot():
     init_db()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
 
-
     conv = ConversationHandler(
-        entry_points=[
-            CommandHandler(["whitelist"], whitelist_entry),
-            MessageHandler(filters.TEXT & filters.Regex(r"(?i)^!whitelist$"), whitelist_entry),
-        ],
+        entry_points=[CommandHandler("whitelist", whitelist_entry),
+                      MessageHandler(filters.TEXT & filters.Regex(r"(?i)^!whitelist$"), whitelist_entry)],
         states={ASKING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_address)]},
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
@@ -172,18 +154,20 @@ def start_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
 
     logger.info("Starting Telegram bot polling...")
-    app.run_polling()
+
+    # Fix for Python 3.13: create an event loop explicitly
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(app.run_polling())
 
 # --- FastAPI keep-alive ---
 fastapi_app = FastAPI()
 
 @fastapi_app.get("/")
-def root():
-    return {"status": "ok"}
+def root(): return {"status": "ok"}
 
 @fastapi_app.get("/ping")
-def ping():
-    return {"pong": True}
+def ping(): return {"pong": True}
 
 def main():
     if not TELEGRAM_TOKEN:
