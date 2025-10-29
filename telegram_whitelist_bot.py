@@ -95,17 +95,23 @@ async def whitelist_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current:
         await update.message.reply_text(f"You already have `{current}`. Use /editwallet to change it.")
         return ConversationHandler.END
-    await update.message.reply_text("Send your Solana wallet address:")
+    
+    mention = f"@{user.username}" if user.username else user.full_name
+    await update.message.reply_text(f"{mention}, please send your Solana wallet address:")
     return ASKING_ADDRESS
+
 
 async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
+    mention = f"@{user.username}" if user.username else user.full_name
+
     if not is_valid_wallet(text):
-        await update.message.reply_text("❌ Invalid address. Try again or /cancel.")
+        await update.message.reply_text(f"{mention}, ❌ invalid address. Try again or /cancel.")
         return ASKING_ADDRESS
+
     set_wallet(user.id, user.username, user.full_name, text)
-    await update.message.reply_text("✅ Added to whitelist!")
+    await update.message.reply_text(f"✅ {mention}, your wallet has been added to the whitelist!")
     return ConversationHandler.END
 
 async def editwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
